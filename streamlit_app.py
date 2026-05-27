@@ -264,6 +264,102 @@ with tab_batch:
         "Charge un fichier contenant des SIREN, des SIRET ou des raisons sociales — "
         "le fichier d'origine est enrichi colonne par colonne, sans persistance serveur."
     )
+
+    with st.expander("📘 **Mode d'emploi — format du fichier et colonnes**", expanded=True):
+        st.markdown(
+            """
+**1. Format accepté** : `.xlsx`, `.xls` ou `.csv` (séparateur auto-détecté `;` `,` ou tabulation).
+La **première ligne doit contenir les en-têtes** de colonnes.
+
+**2. Une seule colonne sert d'entrée** : tu la choisis dans le menu *Colonne source* après upload.
+Cette colonne peut contenir **n'importe lequel** des éléments suivants :
+
+| Type de valeur | Exemple | Détecté en mode *Auto* |
+|---|---|---|
+| **SIREN** (9 chiffres) | `552100554` | ✅ recherche directe |
+| **SIRET** (14 chiffres) | `55210055400067` | ✅ recherche directe |
+| **Raison sociale / nom** | `PEUGEOT SA` | ✅ recherche textuelle |
+| **Nom + ville** | `BOULANGERIE DUPONT PARIS` | ✅ recherche textuelle |
+| **Nom de dirigeant** | `Bernard Arnault` | ✅ recherche textuelle |
+
+Les espaces, tirets et points dans les SIREN/SIRET sont ignorés (`552 100 554` ⇢ `552100554`).
+La validation **Luhn** est appliquée automatiquement aux identifiants.
+
+**3. Toutes les autres colonnes du fichier sont conservées telles quelles** et placées
+**avant** les colonnes enrichies. Tu peux donc avoir un fichier client complet
+(`Nom_Client`, `Code_Tier`, `Montant`, …) et seulement enrichir à partir de la
+colonne `SIREN` ou `Raison_Sociale`.
+
+**4. Colonnes ajoutées par l'enrichissement** (préfixées en clair, source officielle) :
+`denomination`, `siren`, `siret_siege`, `etat_administratif`, `date_creation`,
+`activite_principale`, `section_activite`, `nature_juridique`, `tranche_effectifs`,
+`categorie_entreprise`, `adresse`, `code_postal`, `commune`, `departement`,
+`region`, `latitude`, `longitude`, `dirigeants`, `source`, et une colonne de
+contrôle `_match_status` (`ok`, `ok-insee`, `aucun`, `introuvable`, `vide`,
+`erreur: …`).
+
+**5. Modes de recherche** :
+- **Auto** *(recommandé)* : détecte SIREN/SIRET par leur format, sinon recherche textuelle.
+- **Forcer SIREN/SIRET** : utile si ta colonne ne contient QUE des identifiants
+  (rejette explicitement les valeurs invalides au lieu de tenter une recherche par nom).
+- **Forcer raison sociale** : utile si tu as des numéros de téléphone, des codes
+  internes, etc., qui ressembleraient à des SIREN/SIRET — mais que tu veux
+  traiter comme du texte libre.
+
+**6. Limite par ligne (mode texte uniquement)** : par défaut **1 résultat** (le plus
+pertinent) est conservé. Tu peux remonter jusqu'à 10, mais chaque ligne
+produit alors jusqu'à 10 lignes en sortie (utile pour vérifier les homonymes).
+
+**7. Performance** : ~6 requêtes / seconde (limite API publique). Pour
+**500 lignes**, compte ≈ 1,5 min. L'app n'écrit **rien** côté serveur, le
+fichier enrichi est uniquement disponible via le bouton *Télécharger*.
+
+**8. Aucun secret requis** — la clé INSEE (sidebar) sert uniquement de
+*fallback* pour les SIREN/SIRET introuvables côté API publique.
+            """
+        )
+
+    with st.expander("📥 Télécharger un modèle de fichier", expanded=False):
+        sample = pd.DataFrame(
+            {
+                "id_interne": ["C001", "C002", "C003", "C004", "C005"],
+                "valeur_a_chercher": [
+                    "552100554",          # SIREN
+                    "55210055400067",     # SIRET
+                    "PEUGEOT SA",         # raison sociale
+                    "DANONE 75009",       # nom + code postal
+                    "Bernard Arnault",    # dirigeant
+                ],
+                "commentaire": [
+                    "SIREN Peugeot",
+                    "SIRET siège Peugeot",
+                    "Raison sociale",
+                    "Nom + code postal",
+                    "Dirigeant",
+                ],
+            }
+        )
+        st.dataframe(sample, use_container_width=True, hide_index=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "⬇️ Modèle Excel",
+                data=to_excel_bytes(sample),
+                file_name="modele_entreprises_fr.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="tpl_xlsx",
+                use_container_width=True,
+            )
+        with c2:
+            st.download_button(
+                "⬇️ Modèle CSV",
+                data=to_csv_bytes(sample),
+                file_name="modele_entreprises_fr.csv",
+                mime="text/csv",
+                key="tpl_csv",
+                use_container_width=True,
+            )
+
     file = st.file_uploader("Fichier .xlsx ou .csv", type=["xlsx", "xls", "csv"])
     if file is not None:
         try:
@@ -279,22 +375,52 @@ with tab_batch:
             st.write(f"**{len(df_in)} ligne(s)** — aperçu :")
             st.dataframe(df_in.head(20), use_container_width=True, hide_index=True)
 
+            # Détection auto de la meilleure colonne candidate
+            def _score_col(col: str) -> int:
+                low = col.lower()
+                if any(k in low for k in ("siret",)):
+                    return 100
+                if any(k in low for k in ("siren",)):
+                    return 90
+                if any(k in low for k in ("raison", "denomin", "nom_société", "nom_societe", "company")):
+                    return 80
+                if "nom" in low:
+                    return 50
+                return 0
+
+            cols = list(df_in.columns)
+            default_idx = max(range(len(cols)), key=lambda i: _score_col(cols[i])) if cols else 0
+
             col1, col2 = st.columns(2)
             with col1:
-                source_col = st.selectbox("Colonne source", options=list(df_in.columns))
+                source_col = st.selectbox(
+                    "Colonne source (valeur à rechercher)",
+                    options=cols,
+                    index=default_idx,
+                    help="Colonne contenant le SIREN, SIRET, raison sociale ou nom à chercher.",
+                )
             with col2:
                 mode = st.radio(
                     "Type de recherche",
                     ["Auto (détecte SIREN/SIRET ou texte)", "Forcer SIREN/SIRET", "Forcer raison sociale"],
                     index=0,
+                    help=(
+                        "Auto : recommandé — détecte le format ligne par ligne. "
+                        "Force SIREN/SIRET : rejette les valeurs non numériques 9/14 chiffres. "
+                        "Force raison sociale : traite tout en texte libre."
+                    ),
                 )
 
             limit_per_query = st.number_input(
-                "Si recherche par nom : prendre seulement le N° 1 résultat ? "
-                "(sinon limite max par ligne)",
+                "Nombre de résultats par ligne (recherche textuelle uniquement)",
                 min_value=1,
                 max_value=10,
                 value=1,
+                help=(
+                    "Pour les recherches par nom : 1 = top match seulement. "
+                    "Augmente si tu veux voir les homonymes (le fichier de sortie aura "
+                    "plusieurs lignes par ligne d'entrée)."
+                ),
             )
 
             if st.button("🚀 Lancer l'enrichissement", type="primary", key="run_batch"):
