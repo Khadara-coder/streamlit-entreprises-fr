@@ -120,12 +120,13 @@ re_client = get_re_client()
 
 
 # ------------------------------------------------------------------------- tabs
-tab_id, tab_name, tab_addr, tab_batch, tab_help = st.tabs(
+tab_id, tab_name, tab_addr, tab_batch, tab_reliability, tab_help = st.tabs(
     [
         "🔢 Par SIREN / SIRET",
         "🏷️ Par raison sociale / nom",
         "📍 Par adresse / géographie",
         "📂 Lot Excel / CSV",
+        "🛡️ Fiabilité",
         "ℹ️ Aide",
     ]
 )
@@ -494,7 +495,107 @@ fichier enrichi est uniquement disponible via le bouton *Télécharger*.
                         st.dataframe(pd.DataFrame(errors), use_container_width=True, hide_index=True)
 
 
-# =========================================================== TAB 5 : aide
+# =========================================================== TAB 5 : fiabilité
+with tab_reliability:
+    st.subheader("🛡️ Fiabilité des informations renvoyées par l'application")
+
+    st.success(
+        "**TL;DR** — Les données viennent toutes de **sources publiques officielles** "
+        "(INSEE, INPI/RNE, BAN, ADEME, etc.) via l'API gouvernementale "
+        "*Recherche d'Entreprises*. L'application ne calcule rien, n'invente rien "
+        "et n'enrichit rien par IA : c'est une mise à plat 1:1 du JSON officiel."
+    )
+
+    st.markdown("### ✅ Très fiable — données officielles")
+    st.caption(
+        "L'API [Recherche d'Entreprises](https://recherche-entreprises.api.gouv.fr/docs/) "
+        "(api.gouv.fr) est un service public officiel opéré par la DINUM. Elle agrège :"
+    )
+    reliability_df = pd.DataFrame(
+        [
+            ["siren, siret_siege, denomination, sigle", "INSEE Sirene", "J+1"],
+            ["etat_administratif (A/C), date_creation, date_derniere_maj", "INSEE Sirene", "J+1"],
+            ["activite_principale (NAF/APE), section_activite", "INSEE Sirene", "J+1"],
+            ["nature_juridique, categorie_entreprise", "INSEE Sirene", "J+1"],
+            ["adresse, code_postal, commune, departement, region", "INSEE Sirene", "J+1"],
+            ["latitude, longitude", "BAN (Base Adresse Nationale)", "J+1"],
+            ["dirigeants", "INPI / RNE", "quelques jours"],
+            ["est_rge, est_bio, est_ess, est_qualiopi, est_finess", "ADEME, Agence Bio, ESS France, France Compétences, FINESS", "J+7 à mensuel"],
+            ["convention_collective (IDCC)", "DGT / Légifrance", "mensuel"],
+            ["Bilans financiers (non exposés actuellement)", "INPI", "≈ J+30"],
+        ],
+        columns=["Donnée renvoyée", "Source primaire", "Fraîcheur"],
+    )
+    st.dataframe(reliability_df, use_container_width=True, hide_index=True)
+
+    st.markdown("### ⚠️ Limites à connaître")
+    st.markdown(
+        """
+1. **Tranche d'effectifs** (`tranche_effectifs`, `annee_effectifs`) — l'INSEE la publie avec
+   **~18 mois de retard**, et seulement par tranche (1-2, 3-5, 6-9, …). Ce n'est **pas** un
+   effectif exact.
+2. **Catégorie entreprise** (`PME` / `ETI` / `GE`) — également **~18 mois de retard** côté INSEE.
+3. **Dirigeants** — couvre seulement les **personnes morales immatriculées au RCS**. Les
+   entreprises individuelles non commerçantes, professions libérales et associations
+   sont souvent absentes.
+4. **État administratif** — `A` signifie « existe juridiquement », **pas** « activité réelle »
+   (une entreprise dormante reste `A`).
+5. **Adresse** — c'est l'adresse **déclarée à l'INSEE**, pas nécessairement le lieu
+   d'exploitation réel.
+6. **Recherche par nom en mode batch top-1** — l'API renvoie le résultat le plus pertinent
+   selon son scoring. Pour les noms ambigus (`DUPONT`, `BOULANGERIE PARIS`), **vérifie le
+   SIREN**. Augmente la limite à 5-10 résultats pour contrôler les homonymes.
+7. **Diffusion publique** — les entreprises ayant demandé leur **non-diffusion** n'apparaissent
+   pas via Recherche d'Entreprises. L'API INSEE Sirene (clé optionnelle dans la sidebar) peut
+   y donner accès sous conditions (article 21 du décret 2022-1014).
+        """
+    )
+
+    st.markdown("### 🟢 Ce que l'application ne déforme pas")
+    st.markdown(
+        """
+Le code source ne fait **aucun** des traitements suivants :
+
+- ❌ Pas de calcul, pas d'agrégation, pas d'enrichissement par IA
+- ❌ Pas de complétion automatique de champs manquants
+- ❌ Pas de stockage serveur, pas de cache persistant entre sessions
+
+Il fait uniquement :
+
+- ✅ Appel HTTP → JSON officiel
+- ✅ Mise à plat 1:1 des champs dans des colonnes lisibles
+- ✅ Validation **Luhn** des SIREN/SIRET avant requête
+- ✅ Trace de la source dans la colonne `source`
+        """
+    )
+
+    st.markdown("### 🔗 Vérifier une information par toi-même")
+    st.markdown(
+        """
+- **Annuaire des entreprises** (officiel, DINUM) :
+  <https://annuaire-entreprises.data.gouv.fr/>
+- **INSEE — fiche Sirene** :
+  `https://www.insee.fr/fr/statistiques/serie/{SIREN}`
+- **INPI — Registre National des Entreprises** :
+  <https://data.inpi.fr/>
+- **Légifrance — convention collective IDCC** :
+  <https://www.legifrance.gouv.fr/conv_coll/>
+        """
+    )
+
+    st.markdown("### 📌 Recommandations pratiques")
+    st.info(
+        """
+Pour les usages **critiques** (KYC, due diligence, juridique) :
+
+- Utilise le **SIREN/SIRET comme clé** (mode *Forcer SIREN/SIRET*) plutôt que la recherche par nom.
+- Garde la colonne `source` du résultat pour la traçabilité.
+- Pour une preuve à **valeur légale**, seul l'extrait **Kbis** (infogreffe.fr) fait foi.
+        """
+    )
+
+
+# =========================================================== TAB 6 : aide
 with tab_help:
     st.markdown(
         """
