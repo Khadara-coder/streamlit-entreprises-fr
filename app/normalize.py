@@ -31,18 +31,42 @@ PREFERRED_COLUMNS = [
 ]
 
 
+def _join_list(value: Any, sep: str = ", ") -> str | None:
+    """Concatène une liste/valeur de l'API en string sécurisée (None si vide)."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(v) for v in value if v not in (None, "")]
+        return sep.join(parts) or None
+    if isinstance(value, bool):
+        return "oui" if value else "non"
+    s = str(value).strip()
+    return s or None
+
+
 def from_recherche_entreprises(item: dict[str, Any]) -> dict[str, Any]:
     """Aplatit un résultat de l'API Recherche d'Entreprises."""
     siege = item.get("siege") or {}
     matched = item.get("_matched_etablissement") or siege
 
     dirigeants_raw = item.get("dirigeants") or []
-    dirigeants = "; ".join(
-        " ".join(
-            filter(None, [d.get("prenoms"), d.get("nom"), d.get("qualite") and f"({d['qualite']})"])
-        )
-        for d in dirigeants_raw[:5]
-    )
+    dirigeants_parts: list[str] = []
+    for d in dirigeants_raw[:5]:
+        if not isinstance(d, dict):
+            continue
+        # personne morale
+        if d.get("denomination") or d.get("siren"):
+            label = d.get("denomination") or d.get("siren")
+        else:
+            label = " ".join(
+                str(x) for x in [d.get("prenoms"), d.get("nom")] if x
+            ).strip()
+        qualite = d.get("qualite")
+        if label and qualite:
+            dirigeants_parts.append(f"{label} ({qualite})")
+        elif label:
+            dirigeants_parts.append(label)
+    dirigeants = "; ".join(dirigeants_parts) or None
 
     complements = item.get("complements") or {}
     return {
@@ -71,11 +95,12 @@ def from_recherche_entreprises(item: dict[str, Any]) -> dict[str, Any]:
         "nombre_etablissements": item.get("nombre_etablissements"),
         "nombre_etablissements_ouverts": item.get("nombre_etablissements_ouverts"),
         "dirigeants": dirigeants or None,
-        "convention_collective": ", ".join(complements.get("convention_collective_renseignee") or []) or None,
+        "convention_collective": _join_list(complements.get("liste_idcc")),
         "est_ess": complements.get("est_ess"),
         "est_rge": complements.get("est_rge"),
         "est_bio": complements.get("est_bio"),
-        "site_web": (complements.get("liste_idcc") or None) and None,  # placeholder
+        "est_qualiopi": complements.get("est_qualiopi"),
+        "est_finess": complements.get("est_finess"),
         "source": "recherche-entreprises",
     }
 
