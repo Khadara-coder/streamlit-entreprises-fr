@@ -74,6 +74,10 @@ class RechercheEntreprisesClient:
         nature_juridique: str | None = None,
         etat_administratif: str | None = None,  # 'A' actif, 'C' cessé
         est_siege: bool | None = None,
+        limite_matching_etablissements: int | None = None,
+        page_etablissements: int | None = None,
+        minimal: bool | None = None,
+        include: str | None = None,
         page: int = 1,
         per_page: int = MAX_PER_PAGE,
     ) -> dict[str, Any]:
@@ -98,6 +102,16 @@ class RechercheEntreprisesClient:
             params["etat_administratif"] = etat_administratif
         if est_siege is not None:
             params["est_siege"] = "true" if est_siege else "false"
+        if limite_matching_etablissements is not None:
+            params["limite_matching_etablissements"] = min(
+                100, max(1, int(limite_matching_etablissements))
+            )
+        if page_etablissements is not None:
+            params["page_etablissements"] = max(1, int(page_etablissements))
+        if minimal is not None:
+            params["minimal"] = "true" if minimal else "false"
+        if include:
+            params["include"] = include
         return self._get("/search", params=params)
 
     def by_siren(self, siren: str) -> dict[str, Any] | None:
@@ -121,6 +135,46 @@ class RechercheEntreprisesClient:
             result = dict(result)
             result["_matched_etablissement"] = match
         return result
+
+    def establishments_by_siren(
+        self,
+        siren: str,
+        *,
+        limit: int = 100,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Retourne l'entreprise et ses établissements diffusibles via l'API publique."""
+        company = self.by_siren(siren)
+        if company is None:
+            return None, []
+
+        query = company.get("nom_complet") or company.get("nom_raison_sociale") or siren
+        search_data = self.search(
+            query=str(query),
+            per_page=25,
+            limite_matching_etablissements=limit,
+        )
+        for result in search_data.get("results", []):
+            if str(result.get("siren")) == siren:
+                company = result
+                break
+
+        establishments = [
+            item
+            for item in company.get("matching_etablissements", [])
+            if isinstance(item, dict)
+        ]
+        if not establishments and isinstance(company.get("siege"), dict):
+            establishments = [company["siege"]]
+
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in establishments:
+            siret = str(item.get("siret") or "")
+            if not siret or siret in seen:
+                continue
+            seen.add(siret)
+            deduped.append(item)
+        return company, deduped
 
     def near_address(self, query: str, latitude: float, longitude: float, radius_km: float = 5) -> dict[str, Any]:
         params = {

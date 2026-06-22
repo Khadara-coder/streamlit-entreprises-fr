@@ -42,6 +42,11 @@ Application disponible sur <http://localhost:8501>.
    INSEE_API_KEY = "votre_cle_optionnelle"
    ```
 
+L'application lit aussi la variable d'environnement `INSEE_API_KEY` si elle est
+injectée par votre plateforme de déploiement. Un secret GitHub Actions n'est
+pas automatiquement disponible dans Streamlit Cloud : il doit être transmis au
+runtime, ou ajouté dans les secrets Streamlit Cloud.
+
 ## Architecture
 
 ```

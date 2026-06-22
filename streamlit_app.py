@@ -7,6 +7,7 @@ Aucune base de données, aucun secret obligatoire.
 from __future__ import annotations
 
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -19,12 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app import identifiers
 from app.export import to_csv_bytes, to_excel_bytes
 from app.insee_client import InseeClient, InseeError
+from app.naf import load_naf_labels
 from app.normalize import order_columns, from_recherche_entreprises
 from app.recherche_entreprises_client import (
     RechercheEntreprisesClient,
     RechercheEntreprisesError,
 )
-from app.search_service import lookup_identifiers, search_by_text
+from app.search_service import establishments_by_sirens, lookup_identifiers, search_by_text
 
 st.set_page_config(
     page_title="Entreprises FR — Recherche publique",
@@ -37,6 +39,21 @@ st.set_page_config(
 @st.cache_resource(show_spinner=False)
 def get_re_client() -> RechercheEntreprisesClient:
     return RechercheEntreprisesClient()
+
+
+@st.cache_data(show_spinner=False, ttl=24 * 60 * 60)
+def get_naf_labels() -> dict[str, str]:
+    return load_naf_labels()
+
+
+def get_optional_secret(name: str, default: str = "") -> str:
+    env_value = os.environ.get(name)
+    if env_value:
+        return env_value
+    try:
+        return str(st.secrets.get(name, default) or default)
+    except Exception:
+        return default
 
 
 def render_downloads(df: pd.DataFrame, base_name: str, key: str) -> None:
@@ -97,7 +114,7 @@ with st.sidebar:
     insee_key = st.text_input(
         "Clé X-INSEE-Api-Key-Integration",
         type="password",
-        value=st.secrets.get("INSEE_API_KEY", "") if hasattr(st, "secrets") else "",
+        value=get_optional_secret("INSEE_API_KEY"),
     )
     insee_client: InseeClient | None = None
     if insee_key:
@@ -120,9 +137,10 @@ re_client = get_re_client()
 
 
 # ------------------------------------------------------------------------- tabs
-tab_id, tab_name, tab_addr, tab_batch, tab_reliability, tab_help = st.tabs(
+tab_id, tab_estabs, tab_name, tab_addr, tab_batch, tab_reliability, tab_help = st.tabs(
     [
         "🔢 Par SIREN / SIRET",
+        "🏬 Établissements par SIREN",
         "🏷️ Par raison sociale / nom",
         "📍 Par adresse / géographie",
         "📂 Lot Excel / CSV",
@@ -159,7 +177,209 @@ with tab_id:
                     st.dataframe(errors, use_container_width=True, hide_index=True)
 
 
-# =========================================================== TAB 2 : par raison sociale
+# =========================================================== TAB 2 : établissements par SIREN
+with tab_estabs:
+    st.subheader("Établissements d'une ou plusieurs entreprises")
+    st.caption(
+        "Colle un ou plusieurs SIREN/SIRET. Le résultat contient une ligne de synthèse "
+        "par SIREN, puis les établissements rattachés."
+    )
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        estabs_raw = st.text_area(
+            "SIREN ou SIRET à traiter",
+            value="682033899",
+            height=130,
+            help=(
+                "Un identifiant par ligne, ou séparés par virgule/point-virgule. "
+                "Si tu colles un SIRET, l'app utilise son SIREN de rattachement."
+            ),
+        )
+    with col2:
+        if insee_client is not None:
+            fetch_all_estabs = st.checkbox(
+                "Tout récupérer via INSEE",
+                value=True,
+                help="Utilise la pagination de l'API Sirene. Décoche pour limiter le volume.",
+            )
+            estabs_limit = None
+            if not fetch_all_estabs:
+                estabs_limit = st.number_input(
+                    "Max établissements",
+                    min_value=1,
+                    max_value=200000,
+                    value=1000,
+                    step=100,
+                )
+        else:
+            fetch_all_estabs = False
+            estabs_limit = st.number_input(
+                "Max établissements",
+                min_value=1,
+                max_value=100,
+                value=100,
+                step=5,
+                help="Sans clé INSEE, l'API publique expose au maximum 100 établissements connexes.",
+            )
+
+    if insee_client is None:
+        st.info(
+            "Sans clé INSEE, l'application utilise l'API publique Recherche d'Entreprises "
+            "et peut afficher jusqu'à 100 établissements. Pour récupérer toute la liste "
+            "des grands réseaux, renseigne une clé API Sirene INSEE gratuite et personnelle "
+            "dans la sidebar."
+        )
+
+    if st.button("🏬 Lister les établissements", type="primary", key="run_estabs"):
+        raw_ids = identifiers.parse_batch(estabs_raw)
+        valid_ids, invalid_ids = identifiers.split_valid_invalid(raw_ids)
+        sirens: list[str] = []
+        seen_sirens: set[str] = set()
+        for ident in valid_ids:
+            siren = ident[:9]
+            if siren not in seen_sirens:
+                seen_sirens.add(siren)
+                sirens.append(siren)
+
+        if not sirens:
+            st.error("Aucun SIREN/SIRET valide détecté.")
+        else:
+            try:
+                with st.spinner("Recherche des établissements…"):
+                    progress_update, _, _ = make_progress()
+                    naf_labels = get_naf_labels()
+                    df_estabs, errors = establishments_by_sirens(
+                        re_client,
+                        sirens,
+                        insee_client=insee_client,
+                        naf_labels=naf_labels,
+                        limit=None if fetch_all_estabs else int(estabs_limit),
+                        progress=progress_update,
+                    )
+            except (RechercheEntreprisesError, InseeError) as exc:
+                st.error(f"Erreur API : {exc}")
+            else:
+                if df_estabs.empty:
+                    st.warning("Aucun établissement diffusible trouvé pour les SIREN fournis.")
+                else:
+                    summary_rows = df_estabs[df_estabs["Ligne"].eq("unité légale")]
+                    establishment_rows = df_estabs[df_estabs["Ligne"].eq("établissement")]
+                    st.success(
+                        f"{len(establishment_rows)} établissement(s) récupéré(s) "
+                        f"pour {len(summary_rows)} SIREN."
+                    )
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("SIREN traités", len(summary_rows))
+                    c2.metric("Établissements", len(establishment_rows))
+                    c3.metric("Lignes exportées", len(df_estabs))
+
+                    overview = summary_rows.copy()
+                    overview["Établissements récupérés"] = pd.to_numeric(
+                        overview.get("Établissements récupérés"),
+                        errors="coerce",
+                    ).fillna(0).astype(int)
+                    overview["Lignes exportées"] = overview["Établissements récupérés"] + 1
+                    overview_cols = [
+                        "SIREN",
+                        "Entreprise",
+                        "État",
+                        "Total établissements annoncé",
+                        "Établissements ouverts annoncés",
+                        "Établissements récupérés",
+                        "Lignes exportées",
+                        "Source",
+                    ]
+                    overview_cols = [c for c in overview_cols if c in overview.columns]
+                    st.markdown("### Synthèse par SIREN traité")
+                    st.dataframe(
+                        overview[overview_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    totals = pd.to_numeric(
+                        summary_rows.get("Total établissements annoncé"),
+                        errors="coerce",
+                    )
+                    fetched = pd.to_numeric(
+                        summary_rows.get("Établissements récupérés"),
+                        errors="coerce",
+                    )
+                    limited = summary_rows[totals.fillna(0) > fetched.fillna(0)]
+                    if not limited.empty:
+                        if insee_client is not None and not fetch_all_estabs:
+                            st.warning(
+                                "Certaines listes sont limitées par le maximum choisi dans l'interface."
+                            )
+                        elif insee_client is None:
+                            st.warning(
+                                "Certaines listes sont limitées par l'API publique à 100 établissements. "
+                                "Ajoute une clé API Sirene INSEE gratuite et personnelle pour tout récupérer."
+                            )
+                        with st.expander("Voir les SIREN limités", expanded=False):
+                            st.dataframe(
+                                limited[
+                                    [
+                                        "SIREN",
+                                        "Entreprise",
+                                        "Total établissements annoncé",
+                                        "Établissements récupérés",
+                                    ]
+                                ],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                    if insee_client is not None:
+                        st.caption("Source : API Sirene INSEE — liste complète paginée quand l'option est cochée.")
+                    else:
+                        st.caption("Source : INSEE via API Recherche d'Entreprises — limite publique de 100 établissements par SIREN.")
+
+                    display_cols = [
+                        "SIREN",
+                        "Ligne",
+                        "SIRET",
+                        "Entreprise",
+                        "Activité (NAF/APE)",
+                        "Détails (nom, enseigne, adresse)",
+                        "Création",
+                        "État",
+                        "Siège social",
+                    ]
+                    display_cols = [c for c in display_cols if c in df_estabs.columns]
+                    st.dataframe(
+                        df_estabs[display_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    geo = df_estabs.dropna(subset=["Latitude", "Longitude"]).copy()
+                    if not geo.empty:
+                        geo["latitude"] = pd.to_numeric(geo["Latitude"], errors="coerce")
+                        geo["longitude"] = pd.to_numeric(geo["Longitude"], errors="coerce")
+                        geo = geo.dropna(subset=["latitude", "longitude"])
+                        if not geo.empty:
+                            with st.expander("📍 Carte des établissements", expanded=False):
+                                st.map(geo[["latitude", "longitude"]])
+
+                    render_downloads(df_estabs, "etablissements_par_siren", key="estabs_dl")
+
+                if invalid_ids:
+                    with st.expander(f"⚠️ {len(invalid_ids)} identifiant(s) invalide(s)", expanded=False):
+                        st.dataframe(
+                            pd.DataFrame(
+                                {"identifiant": invalid_ids, "erreur": "format/Luhn invalide"}
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                if not errors.empty:
+                    with st.expander(f"⚠️ {len(errors)} SIREN en erreur / non trouvé(s)", expanded=False):
+                        st.dataframe(errors, use_container_width=True, hide_index=True)
+
+
+# =========================================================== TAB 3 : par raison sociale
 with tab_name:
     st.subheader("Recherche par raison sociale ou nom")
     col1, col2 = st.columns([3, 1])
